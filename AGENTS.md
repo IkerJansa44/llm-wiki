@@ -12,13 +12,17 @@ Before wiki work, read:
 
 For user-provided content or source links, ingest directly instead of asking for permission or waiting for approval. Preserve the raw source, create or update the relevant wiki Markdown files, update the index and log, and then report what changed. The user will iterate on the created Markdown if they want revisions.
 
+Unless the user explicitly says otherwise, treat shared chat conversations as already-analyzed source material to ingest directly, not as pending analysis items for `vault/wiki/analysis-queue.md`.
+
 Keep links meaningful, cite important claims, and keep synthesized wiki content free of unresolved contradictions. If source claims conflict, do not silently resolve them; document the conflict in the affected Markdown and call it out in the final report.
 
 Include visual content when it materially helps learning or understanding, especially for technical topics, conceptual explanations, research papers, systems, architectures, algorithms, charts, or source figures. Do not add decorative or locator visuals to simple personal records, administrative documents, queue entries, metadata pages, or other notes where the visual does not explain the content.
 
 When a technical concept would be easier to understand visually, proactively generate or acquire a helpful image, diagram, or visual explanation and add it to the wiki. The user finds visuals especially useful for learning technical material.
 
-When adding local images or diagrams to wiki pages, render them as Markdown image embeds with relative paths from the note instead of leaving bare file paths in code formatting.
+When adding local images or diagrams to wiki pages, render them as Markdown image embeds with relative paths from the note instead of leaving bare file paths in code formatting. For generated explanatory diagrams that are tightly coupled to a specific explanation, prefer placing the diagram inline in the same Markdown note, such as Mermaid or inline SVG, so the visual and explanation travel together. Use separate files under `vault/wiki/artifacts/` when the asset is reused across notes, too large or awkward to keep inline, sourced externally, raster-only, or otherwise better maintained as a standalone artifact.
+
+Inline SVG compatibility rule: do not use `<style>` blocks, CSS classes, CSS variables, or class-dependent styling in inline SVG. Some Markdown/Obsidian renderers strip or ignore inline CSS, which can make diagrams render as all black. Put visual attributes directly on each SVG element, including `fill`, `stroke`, `stroke-width`, `font-family`, `font-size`, and `font-weight` where needed. Before reporting an inline SVG done, search the edited Markdown for `<style`, `class=`, and `var(` inside the SVG and remove them.
 
 When the user corrects the maintainer workflow or answer style, preserve the correction in these instructions or the wiki conventions so future sessions inherit it.
 

@@ -35,8 +35,8 @@ range extraction. Use `--start` and `--end` when you want only part of a video.
 
 ## Telegram to Codex
 
-`scripts/telegram_codex.py` polls a Telegram bot and forwards text messages from one
-allowed Telegram user into Codex:
+`scripts/telegram_codex.py` polls a Telegram bot and forwards text messages and
+document attachments from one allowed Telegram user into Codex:
 
 ```bash
 TELEGRAM_BOT_TOKEN=123:abc
@@ -51,7 +51,19 @@ codex --ask-for-approval never exec --sandbox workspace-write --cd /Users/ikerja
 ```
 
 Codex receives the Telegram text on stdin and writes its final answer back to the
-same Telegram chat. Runtime state and Codex output files go under
+same Telegram chat. Documents are downloaded into `vault/raw/` before Codex runs,
+with safe filenames containing the message date, chat ID, and message ID. The
+prompt includes the saved file path, original filename, MIME type, and caption.
+With no caption, Codex is instructed to ingest the document according to
+`AGENTS.md`; add a caption to provide specific instructions. PDF prompts direct
+Codex to use the repository Docling helper. Existing raw files are never
+overwritten, and failed or incomplete downloads do not trigger Codex.
+
+The hosted [Telegram Bot API](https://core.telegram.org/bots/api#getfile) supports
+downloads up to 20 MB; larger attachments receive an error in the chat.
+Restart the polling process after updating this script to load the changes.
+
+Runtime state and Codex output files go under
 `var/telegram-codex/`, which is also gitignored.
 
 To keep it running on macOS, install a LaunchAgent at

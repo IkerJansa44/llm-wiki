@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
+import tempfile
 import textwrap
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -19,9 +21,15 @@ DEFAULT_STATE_DIR = Path("var/telegram-codex")
 DEFAULT_TIMEOUT = 60
 DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 MAX_TELEGRAM_MESSAGE = 3900
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VAULT_ROOT = (REPO_ROOT / "vault").resolve()
+RAW_ROOT = VAULT_ROOT / "raw"
 OFFSET_FILE = "offset.txt"
+
+
+class DocumentTooLarge(ValueError):
+    pass
 
 
 def load_dotenv(path: Path) -> None:
@@ -75,7 +83,54 @@ def user_allowed(user: dict[str, object], allowed_id: str | None, username: str 
     return False
 
 
-def prompt_for(message: dict[str, object]) -> str:
+def download_document(token: str, message: dict[str, object]) -> Path:
+    """Preserve a complete attachment without overwriting an existing raw source."""
+    document = message["document"]
+    if document.get("file_size", 0) > MAX_DOCUMENT_BYTES:
+        raise DocumentTooLarge("Document exceeds the Telegram bot download limit of 20 MB.")
+
+    body = api_request(token, "getFile", {"file_id": document["file_id"]})
+    file_info = body.get("result")
+    if not isinstance(file_info, dict) or not file_info.get("file_path"):
+        raise RuntimeError("Telegram did not provide a download path.")
+    remote_path = str(file_info["file_path"])
+    original_name = str(document.get("file_name") or Path(remote_path).name)
+    basename = Path(original_name.replace("\\", "/")).name
+    suffix = re.sub(r"[^a-zA-Z0-9.]", "", Path(basename).suffix).lower()[:16]
+    stem = re.sub(r"[^a-zA-Z0-9]+", "-", Path(basename).stem).strip("-").lower()
+    day = datetime.fromtimestamp(int(message["date"]), tz=UTC).strftime("%Y-%m-%d")
+    chat_id = int(message["chat"]["id"])
+    message_id = int(message["message_id"])
+    RAW_ROOT.mkdir(parents=True, exist_ok=True)
+    destination = RAW_ROOT / f"{day}-telegram-{chat_id}-{message_id}-{stem[:100] or 'document'}{suffix}"
+    if destination.exists():
+        return destination
+
+    url = f"https://api.telegram.org/file/bot{token}/{quote(remote_path, safe='/')}"
+    with urlopen(url, timeout=DEFAULT_TIMEOUT) as response:
+        content = response.read(MAX_DOCUMENT_BYTES + 1)
+    if len(content) > MAX_DOCUMENT_BYTES:
+        raise DocumentTooLarge("Document exceeds the Telegram bot download limit of 20 MB.")
+    expected_size = file_info.get("file_size", document.get("file_size"))
+    if expected_size is not None and len(content) != expected_size:
+        raise RuntimeError("Telegram document download was incomplete.")
+
+    # Publish only complete downloads; hard-linking never replaces a raw source.
+    with tempfile.NamedTemporaryFile(dir=RAW_ROOT, prefix=".telegram-", delete=False) as temp:
+        temporary_path = Path(temp.name)
+        try:
+            temp.write(content)
+            temp.flush()
+            try:
+                os.link(temporary_path, destination)
+            except FileExistsError:
+                pass
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    return destination
+
+
+def prompt_for(message: dict[str, object], document_path: Path | None = None) -> str:
     user = message.get("from", {})
     if not isinstance(user, dict):
         user = {}
@@ -86,7 +141,7 @@ def prompt_for(message: dict[str, object]) -> str:
     username = user.get("username")
     sent_at = datetime.fromtimestamp(int(message["date"]), tz=UTC).isoformat()
 
-    return textwrap.dedent(
+    prompt = textwrap.dedent(
         f"""
         Telegram message received from allowed user.
 
@@ -98,6 +153,20 @@ def prompt_for(message: dict[str, object]) -> str:
         {text}
         """
     ).strip()
+    if document_path is not None:
+        document = message["document"]
+        prompt += "\n\nAttached document (already downloaded and preserved):\n"
+        prompt += f"Local path: {document_path}\n"
+        prompt += f"Original filename: {document.get('file_name', document_path.name)}\n"
+        prompt += f"MIME type: {document.get('mime_type', 'unknown')}\n"
+        prompt += (
+            "Read the local attachment and follow the caption's instructions. "
+            "If there is no caption, ingest the document into the wiki according to AGENTS.md. "
+            "Preserve the downloaded raw file unchanged. For PDFs, use the repository "
+            "Docling helper to create a working extraction and verify important claims "
+            "against the original PDF."
+        )
+    return prompt
 
 
 def run_codex(prompt: str, state_dir: Path, codex_bin: str) -> tuple[int, str]:
@@ -158,7 +227,11 @@ def handle_update(
     codex_bin: str,
 ) -> None:
     message = update.get("message")
-    if not isinstance(message, dict) or not message.get("text"):
+    if not isinstance(message, dict):
+        return
+    document = message.get("document")
+    has_document = isinstance(document, dict) and bool(document.get("file_id"))
+    if not message.get("text") and not has_document:
         return
 
     user = message.get("from")
@@ -170,8 +243,20 @@ def handle_update(
         return
 
     chat_id = chat["id"]
+    document_path = None
+    if has_document:
+        send_message(token, chat_id, "Downloading document...")
+        try:
+            document_path = download_document(token, message)
+        except DocumentTooLarge as exc:
+            send_message(token, chat_id, f"Could not download document: {exc}")
+            return
+        except Exception:
+            # HTTP exceptions can contain the bot token in the download URL.
+            send_message(token, chat_id, "Could not download document. Please resend the attachment.")
+            return
     send_message(token, chat_id, "Running Codex...")
-    code, output = run_codex(prompt_for(message), state_dir, codex_bin)
+    code, output = run_codex(prompt_for(message, document_path), state_dir, codex_bin)
     if code == 0:
         send_message(token, chat_id, output)
         return
